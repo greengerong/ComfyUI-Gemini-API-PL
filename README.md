@@ -33,6 +33,7 @@
 
 
 安装完成后重启ComfyUI
+![](./workflow/demo.png)
 
 ## 获取API密钥
 **注意：**地区限制。
