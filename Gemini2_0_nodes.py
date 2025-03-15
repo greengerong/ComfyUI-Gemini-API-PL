@@ -19,14 +19,13 @@ class GeminiImageGenerator:
         return {
             "required": {
                 "prompt": ("STRING", {"multiline": True}),
-                "api_key": ("STRING", {"default": "", "multiline": False}),
+                "api_key": ("STRING", {"default": "", "multiline": False, "tooltip": "**Get API Key**: Visit Google AI Studio (https://aistudio.google.com/apikey?hl=en). Create an account or log in, then create a new API key in the 'API Keys' section. Copy the API key and paste it into the api_key parameter. (If you enable the save_key option, you only need to enter it once, and it will be saved automatically for future use)."}),
+                "save_key": (["False", "True"], {"default": "False", "tooltip": "automatically save api_key to local file"}),
                 "model": (["models/gemini-2.0-flash-exp"], {"default": "models/gemini-2.0-flash-exp"}),
-                "width": ("INT", {"default": 1024, "min": 512, "max": 2048, "step": 8}),
-                "height": ("INT", {"default": 1024, "min": 512, "max": 2048, "step": 8}),
-                "temperature": ("FLOAT", {"default": 1, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "temperature": ("FLOAT", {"default": 0.8, "min": 0.0}),
             },
             "optional": {
-                "seed": ("INT", {"default": 66666666, "min": 0, "max": 2147483647}),
+                "seed": ("INT", {"default": 66666666, "min": 0}),
                 "image": ("IMAGE",),
             }
         }
@@ -57,22 +56,26 @@ class GeminiImageGenerator:
     
     def log(self, message):
         """全局日志函数：记录到日志列表"""
+        print(message)
         if hasattr(self, 'log_messages'):
             self.log_messages.append(message)
         return message
     
-    def get_api_key(self, user_input_key):
+    def get_api_key(self, user_input_key, save_key="False"):
         """获取API密钥，优先使用用户输入的密钥"""
-        # 如果用户输入了有效的密钥，使用并保存
+        # 如果用户输入了有效的密钥，使用并根据设置决定是否保存
         if user_input_key and len(user_input_key) > 10:
             self.log("使用用户输入的API密钥")
-            # 保存到文件中
-            try:
-                with open(self.key_file, "w") as f:
-                    f.write(user_input_key)
-                self.log("已保存API密钥到节点目录")
-            except Exception as e:
-                self.log(f"保存API密钥失败: {e}")
+            # 根据save_key参数决定是否保存到文件中
+            if save_key == "True":
+                try:
+                    with open(self.key_file, "w") as f:
+                        f.write(user_input_key)
+                    self.log("已保存API密钥到节点目录")
+                except Exception as e:
+                    self.log(f"保存API密钥失败: {e}")
+            else:
+                self.log("根据设置，API密钥不会被保存")
             return user_input_key
             
         # 如果用户没有输入，尝试从文件读取
@@ -81,7 +84,7 @@ class GeminiImageGenerator:
                 with open(self.key_file, "r") as f:
                     saved_key = f.read().strip()
                 if saved_key and len(saved_key) > 10:
-                    self.log("使用已保存的API密钥")
+                    self.log(f"使用已保存{self.key_file}的API密钥")
                     return saved_key
             except Exception as e:
                 self.log(f"读取保存的API密钥失败: {e}")
@@ -90,7 +93,7 @@ class GeminiImageGenerator:
         self.log("警告: 未提供有效的API密钥")
         return ""
     
-    def generate_empty_image(self, width, height):
+    def generate_empty_image(self, width=1024, height=1024):
         """生成标准格式的空白RGB图像张量 - 确保ComfyUI兼容格式 [B,H,W,C]"""
         # 创建一个符合ComfyUI标准的图像张量
         # ComfyUI期望 [batch, height, width, channels] 格式!
@@ -170,7 +173,7 @@ class GeminiImageGenerator:
             self.log(f"图像保存错误: {str(e)}")
             return False
     
-    def process_image_data(self, image_data, width, height):
+    def process_image_data(self, image_data):
         """处理API返回的图像数据，返回ComfyUI格式的图像张量 [B,H,W,C]"""
         try:
             # 打印图像数据类型和大小以便调试
@@ -196,20 +199,15 @@ class GeminiImageGenerator:
                     else:
                         # 如果是向量或其他格式，生成一个占位图像
                         self.log("无法解析图像数据，创建一个空白图像")
-                        return self.generate_empty_image(width, height)
+                        return self.generate_empty_image()
                 except Exception as e2:
                     self.log(f"备用解析方法也失败: {e2}")
-                    return self.generate_empty_image(width, height)
+                    return self.generate_empty_image()
             
             # 确保图像是RGB模式
             if pil_image.mode != 'RGB':
                 pil_image = pil_image.convert('RGB')
                 self.log(f"图像已转换为RGB模式")
-            
-            # 调整图像大小
-            if pil_image.width != width or pil_image.height != height:
-                pil_image = pil_image.resize((width, height), Image.Resampling.LANCZOS)
-                self.log(f"图像已调整为目标尺寸: {width}x{height}")
             
             # 关键修复: 使用ComfyUI兼容的格式 [batch, height, width, channels]
             # 而不是PyTorch标准的 [batch, channels, height, width]
@@ -222,9 +220,9 @@ class GeminiImageGenerator:
         except Exception as e:
             self.log(f"处理图像数据时出错: {e}")
             traceback.print_exc()
-            return self.generate_empty_image(width, height)
+            return self.generate_empty_image()
     
-    def generate_image(self, prompt, api_key, model, width, height, temperature, seed=66666666, image=None):
+    def generate_image(self, prompt, api_key, save_key, model, temperature, seed=66666666, image=None):
         """生成图像 - 使用简化的API密钥管理"""
         temp_img_path = None
         response_text = ""
@@ -234,13 +232,13 @@ class GeminiImageGenerator:
         
         try:
             # 获取API密钥
-            actual_api_key = self.get_api_key(api_key)
+            actual_api_key = self.get_api_key(api_key, save_key)
             
             if not actual_api_key:
                 error_message = "错误: 未提供有效的API密钥。请在节点中输入API密钥或确保已保存密钥。"
                 self.log(error_message)
-                full_text = "## 错误\n" + error_message + "\n\n## 使用说明\n1. 在节点中输入您的Google API密钥\n2. 密钥将自动保存到节点目录，下次可以不必输入"
-                return (self.generate_empty_image(width, height), full_text)
+                full_text = "## 错误\n" + error_message + "\n\n## 使用说明\n1. 在节点中输入您的Google API密钥\n2. 如果设置了保存密钥选项，密钥将自动保存到节点目录，下次可以不必输入"
+                return (self.generate_empty_image(), full_text)
             
             # 创建客户端实例
             client = genai.Client(api_key=actual_api_key)
@@ -254,8 +252,9 @@ class GeminiImageGenerator:
                 self.log(f"使用指定的种子值: {seed}")
             
             # 构建简单提示
-            simple_prompt = f"Create a detailed image of: {prompt}"
-            
+            simple_prompt = f"Create a detailed image of: {prompt}. Requires that the returned object contain the generated image resolution width and height fields."
+                    
+
             # 配置生成参数，使用用户指定的温度值
             gen_config = types.GenerateContentConfig(
                 temperature=temperature,
@@ -312,22 +311,21 @@ class GeminiImageGenerator:
             # 打印请求信息
             self.log(f"请求Gemini API生成图像，种子值: {seed}, 包含参考图像: {has_reference}")
             
-            # 调用API
+            # 调用API            
             response = client.models.generate_content(
-                model="models/gemini-2.0-flash-exp",
+                model=model,
                 contents=contents,
                 config=gen_config
             )
             
-            # 响应处理
-            self.log("API响应接收成功，正在处理...")
-            
+            # 响应处理            
             if not hasattr(response, 'candidates') or not response.candidates:
                 self.log("API响应中没有candidates")
                 # 合并日志和返回值
                 full_text = "\n".join(self.log_messages) + "\n\nAPI返回了空响应"
-                return (self.generate_empty_image(width, height), full_text)
+                return (self.generate_empty_image(), full_text)
             
+        
             # 检查响应中是否有图像
             image_found = False
             
@@ -441,11 +439,6 @@ class GeminiImageGenerator:
                             pil_image = pil_image.convert('RGB')
                             self.log(f"图像已转换为RGB模式")
                         
-                        # 调整图像尺寸
-                        if pil_image.width != width or pil_image.height != height:
-                            pil_image = pil_image.resize((width, height), Image.Resampling.LANCZOS)
-                            self.log(f"图像已调整为目标尺寸: {width}x{height}")
-                        
                         # 转换为ComfyUI格式
                         img_array = np.array(pil_image).astype(np.float32) / 255.0
                         img_tensor = torch.from_numpy(img_array).unsqueeze(0)
@@ -468,7 +461,7 @@ class GeminiImageGenerator:
             
             # 合并日志和API返回文本
             full_text = "## 处理日志\n" + "\n".join(self.log_messages) + "\n\n## API返回\n" + response_text
-            return (self.generate_empty_image(width, height), full_text)
+            return (self.generate_empty_image(), full_text)
         
         except Exception as e:
             error_message = f"处理过程中出错: {str(e)}"
@@ -476,13 +469,13 @@ class GeminiImageGenerator:
             
             # 合并日志和错误信息
             full_text = "## 处理日志\n" + "\n".join(self.log_messages) + "\n\n## 错误\n" + error_message
-            return (self.generate_empty_image(width, height), full_text)
+            return (self.generate_empty_image(), full_text)
 
 # 注册节点
 NODE_CLASS_MAPPINGS = {
-    "Google-Gemini": GeminiImageGenerator
+    "Google-Gemini-PL": GeminiImageGenerator
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Google-Gemini": "Gemini 2.0 image"
+    "Google-Gemini-PL": "Gemini 2.0 image - PL"
 } 
