@@ -16,7 +16,7 @@
 1. 将此存储库克隆到ComfyUI的`custom_nodes`目录：
    ```
    cd ComfyUI/custom_nodes
-   git clone https://github.com/CY-CHENYUE/ComfyUI-Gemini-API-PL
+   git clonehttps://github.com/greengerong/ComfyUI-Gemini-API-PL
    ```
 
 2. 安装所需依赖：
