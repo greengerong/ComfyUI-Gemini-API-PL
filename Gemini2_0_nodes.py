@@ -27,11 +27,13 @@ class GeminiImageGenerator:
             "optional": {
                 "seed": ("INT", {"default": 66666666, "min": 0}),
                 "image": ("IMAGE",),
+                "image1": ("IMAGE",),
+                "image2": ("IMAGE",),
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("image", "API Respond")
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("image", "response_text", "API Respond")
     FUNCTION = "generate_image"
     CATEGORY = "Google-Gemini"
     
@@ -84,7 +86,7 @@ class GeminiImageGenerator:
                 with open(self.key_file, "r") as f:
                     saved_key = f.read().strip()
                 if saved_key and len(saved_key) > 10:
-                    self.log(f"使用已保存{self.key_file}的API密钥")
+                    self.log(f"使用已保存本地文件中的API密钥")
                     return saved_key
             except Exception as e:
                 self.log(f"读取保存的API密钥失败: {e}")
@@ -173,6 +175,42 @@ class GeminiImageGenerator:
             self.log(f"图像保存错误: {str(e)}")
             return False
     
+    def process_reference_image(self, image, image_name):
+        """处理参考图像并返回处理结果"""
+        if image is None:
+            return None, None, False
+            
+        try:
+            # 确保图像格式正确
+            if len(image.shape) == 4 and image.shape[0] == 1:  # [1, H, W, 3] 格式
+                # 获取第一帧图像
+                input_image = image[0].cpu().numpy()
+                
+                # 转换为PIL图像
+                input_image = (input_image * 255).astype(np.uint8)
+                pil_image = Image.fromarray(input_image)
+                
+                # 生成时间戳并保存为临时文件                
+                temp_img_path = os.path.join(tempfile.gettempdir(), f"{image_name}.png")
+                pil_image.save(temp_img_path)
+                
+                self.log(f"{image_name}处理成功，尺寸: {pil_image.width}x{pil_image.height}")
+                
+                # 读取图像数据
+                with open(temp_img_path, "rb") as f:
+                    image_bytes = f.read()
+                
+                # 创建图像部分
+                img_part = {"inline_data": {"mime_type": "image/png", "data": image_bytes}}
+                
+                return img_part, temp_img_path, True
+            else:
+                self.log(f"{image_name}格式不正确: {image.shape}")
+                return None, None, False
+        except Exception as img_error:
+            self.log(f"{image_name}处理错误: {str(img_error)}")
+            return None, None, False
+    
     def process_image_data(self, image_data):
         """处理API返回的图像数据，返回ComfyUI格式的图像张量 [B,H,W,C]"""
         try:
@@ -222,9 +260,32 @@ class GeminiImageGenerator:
             traceback.print_exc()
             return self.generate_empty_image()
     
-    def generate_image(self, prompt, api_key, save_key, model, temperature, seed=66666666, image=None):
+    def json_serializable(self, obj):
+        """将对象转换为可JSON序列化的格式，处理二进制数据和其他不可序列化的类型"""
+        if isinstance(obj, dict):
+            result = {}
+            for key, value in obj.items():
+                if key == 'data' and isinstance(value, bytes):
+                    # 对于二进制数据，只显示长度信息
+                    result[key] = f"<binary data, length: {len(value)} bytes>"
+                else:
+                    result[key] = self.json_serializable(value)
+            return result
+        elif isinstance(obj, list):
+            return [self.json_serializable(item) for item in obj]
+        elif isinstance(obj, bytes):
+            return f"<binary data, length: {len(obj)} bytes>"
+        else:
+            # 对于其他类型，尝试直接返回，如果不可序列化，则返回其字符串表示
+            try:
+                json.dumps(obj)
+                return obj
+            except (TypeError, OverflowError):
+                return str(obj)
+    
+    def generate_image(self, prompt, api_key, save_key, model, temperature, seed=66666666, image=None, image1=None, image2=None):
         """生成图像 - 使用简化的API密钥管理"""
-        temp_img_path = None
+        temp_paths = []
         response_text = ""
         
         # 重置日志消息
@@ -238,7 +299,7 @@ class GeminiImageGenerator:
                 error_message = "错误: 未提供有效的API密钥。请在节点中输入API密钥或确保已保存密钥。"
                 self.log(error_message)
                 full_text = "## 错误\n" + error_message + "\n\n## 使用说明\n1. 在节点中输入您的Google API密钥\n2. 如果设置了保存密钥选项，密钥将自动保存到节点目录，下次可以不必输入"
-                return (self.generate_empty_image(), full_text)
+                return (self.generate_empty_image(), "", full_text)
             
             # 创建客户端实例
             client = genai.Client(api_key=actual_api_key)
@@ -252,9 +313,8 @@ class GeminiImageGenerator:
                 self.log(f"使用指定的种子值: {seed}")
             
             # 构建简单提示
-            simple_prompt = f"Create a detailed image of: {prompt}. Requires that the returned object contain the generated image resolution width and height fields."
+            simple_prompt = f"Create a detailed image of: {prompt}."
                     
-
             # 配置生成参数，使用用户指定的温度值
             gen_config = types.GenerateContentConfig(
                 temperature=temperature,
@@ -268,49 +328,45 @@ class GeminiImageGenerator:
             # 处理参考图像
             contents = []
             has_reference = False
+            reference_count = 0
             
-            if image is not None:
-                try:
-                    # 确保图像格式正确
-                    if len(image.shape) == 4 and image.shape[0] == 1:  # [1, H, W, 3] 格式
-                        # 获取第一帧图像
-                        input_image = image[0].cpu().numpy()
-                        
-                        # 转换为PIL图像
-                        input_image = (input_image * 255).astype(np.uint8)
-                        pil_image = Image.fromarray(input_image)
-                        
-                        # 保存为临时文件
-                        temp_img_path = os.path.join(tempfile.gettempdir(), f"reference_{int(time.time())}.png")
-                        pil_image.save(temp_img_path)
-                        
-                        self.log(f"参考图像处理成功，尺寸: {pil_image.width}x{pil_image.height}")
-                        
-                        # 读取图像数据
-                        with open(temp_img_path, "rb") as f:
-                            image_bytes = f.read()
-                        
-                        # 添加图像部分和文本部分
-                        img_part = {"inline_data": {"mime_type": "image/png", "data": image_bytes}}
-                        txt_part = {"text": simple_prompt + " Use this reference image as style guidance."}
-                        
-                        # 组合内容(图像在前，文本在后)
-                        contents = [img_part, txt_part]
-                        has_reference = True
-                        self.log("参考图像已添加到请求中")
-                    else:
-                        self.log(f"参考图像格式不正确: {image.shape}")
-                        contents = simple_prompt
-                except Exception as img_error:
-                    self.log(f"参考图像处理错误: {str(img_error)}")
-                    contents = simple_prompt
+            # 处理所有参考图像
+            image_configs = [
+                (image, "image0"),
+                (image1, "image1"),
+                (image2, "image2")
+            ]
+            
+            for img, name in image_configs:
+                img_part, temp_path, success = self.process_reference_image(img, name)
+                if success:
+                    contents.append(img_part)
+                    if temp_path:
+                        temp_paths.append(temp_path)
+                    has_reference = True
+                    reference_count += 1
+            
+            # 添加文本提示
+            if has_reference:
+                # 根据参考图像数量调整提示文本
+                if reference_count == 1:
+                    txt_part = {"text": simple_prompt + " Use this reference image as style guidance, named image0."}
+                else:
+                    txt_part = {"text": simple_prompt + f" Use these {reference_count} reference images as style guidance, named image0, image1, image2."}
+                contents.append(txt_part)
+                self.log(f"已添加{reference_count}张参考图像到请求中")
             else:
                 # 没有参考图像，只使用文本
                 contents = simple_prompt
+                self.log("未添加参考图像，仅使用文本提示")
             
             # 打印请求信息
-            self.log(f"请求Gemini API生成图像，种子值: {seed}, 包含参考图像: {has_reference}")
+            self.log(f"请求Gemini API生成图像，种子值: {seed}, 包含参考图像: {has_reference}, 参考图像数量: {reference_count}")
             
+            # 打印请求内容（处理二进制数据）
+            serializable_contents = self.json_serializable(contents)
+            print(f"请求内容: {json.dumps(serializable_contents, ensure_ascii=False, indent=2)}")
+                        
             # 调用API            
             response = client.models.generate_content(
                 model=model,
@@ -323,7 +379,7 @@ class GeminiImageGenerator:
                 self.log("API响应中没有candidates")
                 # 合并日志和返回值
                 full_text = "\n".join(self.log_messages) + "\n\nAPI返回了空响应"
-                return (self.generate_empty_image(), full_text)
+                return (self.generate_empty_image(), "", full_text)
             
         
             # 检查响应中是否有图像
@@ -448,7 +504,7 @@ class GeminiImageGenerator:
                         
                         # 合并日志和API返回文本
                         full_text = "## 处理日志\n" + "\n".join(self.log_messages) + "\n\n## API返回\n" + response_text
-                        return (img_tensor, full_text)
+                        return (img_tensor, response_text, full_text)
                     except Exception as e:
                         self.log(f"图像处理错误: {e}")
                         traceback.print_exc()  # 添加详细的错误追踪信息
@@ -461,15 +517,16 @@ class GeminiImageGenerator:
             
             # 合并日志和API返回文本
             full_text = "## 处理日志\n" + "\n".join(self.log_messages) + "\n\n## API返回\n" + response_text
-            return (self.generate_empty_image(), full_text)
+            return (self.generate_empty_image(), response_text, full_text)
         
-        except Exception as e:
+        except Exception as e:                        
+            traceback.print_exc()
             error_message = f"处理过程中出错: {str(e)}"
             self.log(f"Gemini图像生成错误: {str(e)}")
             
             # 合并日志和错误信息
             full_text = "## 处理日志\n" + "\n".join(self.log_messages) + "\n\n## 错误\n" + error_message
-            return (self.generate_empty_image(), full_text)
+            return (self.generate_empty_image(), "", full_text)
 
 # 注册节点
 NODE_CLASS_MAPPINGS = {
